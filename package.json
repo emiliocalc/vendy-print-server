@@ -1,0 +1,40 @@
+{
+  "name": "vendy-print-server",
+  "version": "1.4.3",
+  "description": "Micro-servicio ESC/POS para impresión térmica nativa",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "pkg . --compress GZip",
+    "build:win": "pkg . --targets node20-win-x64 --compress GZip --output dist/vendy-print-server.exe"
+  },
+  "bin": "server.js",
+  "pkg": {
+    "targets": [
+      "node20-win-x64"
+    ],
+    "outputPath": "dist",
+    "assets": [
+      "vendy-print.env.example",
+      "service-installer.js",
+      "service-uninstaller.js",
+      "printJobProcessor.js",
+      "logRotation.js"
+    ],
+    "scripts": [
+      "server.js",
+      "printJobProcessor.js",
+      "logRotation.js"
+    ]
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "node-windows": "^1.0.0-beta.8"
+  },
+  "author": "Vendy",
+  "license": "MIT",
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.14.0"
+  }
+}
