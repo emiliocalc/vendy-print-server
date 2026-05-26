@@ -3,15 +3,35 @@
  * Envuelve server.js con ícono en bandeja y selector de impresora.
  */
 
-const { fork, exec, execSync } = require('child_process');
+const { fork, exec, execSync, spawn } = require('child_process');
 const path  = require('path');
 const http  = require('http');
 const fs    = require('fs');
 const SysTray = require('systray').default;
 
 // ── Paths ──────────────────────────────────────────────────────
-const ICON_PATH = path.join(__dirname, 'assets', 'icon.ico');
-const ENV_PATH  = path.join(process.cwd(), '.env');
+const ICON_PATH   = path.join(__dirname, 'assets', 'icon.ico');
+const ENV_PATH    = path.join(process.cwd(), '.env');
+const INSTALL_DIR = path.join(process.env.LOCALAPPDATA, 'VendyPrintServer');
+const INSTALLED_EXE = path.join(INSTALL_DIR, 'vendy-print-server.exe');
+
+function isRunningFromInstallDir() {
+    return process.execPath.toLowerCase() === INSTALLED_EXE.toLowerCase();
+}
+
+function copyToInstallDir() {
+    fs.mkdirSync(INSTALL_DIR, { recursive: true });
+    fs.copyFileSync(process.execPath, INSTALLED_EXE);
+    // Copiar datos existentes si los hay (primera vez no existen)
+    const srcDir = path.dirname(process.execPath);
+    for (const f of ['.env', '.vendy-credentials.json']) {
+        const src = path.join(srcDir, f);
+        const dst = path.join(INSTALL_DIR, f);
+        if (fs.existsSync(src) && !fs.existsSync(dst)) {
+            try { fs.copyFileSync(src, dst); } catch (_) {}
+        }
+    }
+}
 
 // ── Estado global ──────────────────────────────────────────────
 let serverProcess = null;
@@ -195,8 +215,8 @@ function startTray() {
 }
 
 // ── Crear acceso directo apuntando al .exe ────────────────────
-function createShortcut(lnkPath, description) {
-    const exePath = process.execPath;
+function createShortcut(lnkPath, description, targetExe) {
+    const exePath = targetExe || process.execPath;
     const exeDir  = path.dirname(exePath);
     const ps = [
         `$WshShell = New-Object -ComObject WScript.Shell`,
@@ -273,26 +293,48 @@ function showAlreadyInstalledMessage() {
     ], 'vendy_already_msg.ps1');
 }
 
-// ── Acceso directo en Startup + Escritorio ────────────────────
+// ── Instalar en ubicación permanente y crear accesos directos ─
 function ensureShortcuts() {
-    const startupDir  = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
-    const desktopDir  = path.join(process.env.USERPROFILE, 'Desktop');
-    const startupLink = path.join(startupDir, 'VendyPrintServer.lnk');
-    const desktopLink = path.join(desktopDir, 'Vendy Print Server.lnk');
+    const startupLink = path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'VendyPrintServer.lnk');
+    const desktopLink = path.join(process.env.USERPROFILE, 'Desktop', 'Vendy Print Server.lnk');
 
-    const firstInstall = !fs.existsSync(startupLink) && !fs.existsSync(desktopLink);
+    const shortcutsOk = fs.existsSync(startupLink) && fs.existsSync(desktopLink);
+    const inInstallDir = isRunningFromInstallDir();
 
-    if (!firstInstall) {
-        showAlreadyInstalledMessage();
-        return;
+    // Todo correcto: ejecutando desde carpeta permanente con accesos directos
+    if (inInstallDir && shortcutsOk) return;
+
+    // Instalación nueva: preguntar al usuario
+    if (!inInstallDir && !shortcutsOk) {
+        if (!askInstallConfirm()) return;
     }
 
-    if (!askInstallConfirm()) return;
+    // Copiar exe a carpeta permanente si aún no estamos ahí
+    if (!inInstallDir) {
+        try {
+            copyToInstallDir();
+        } catch (err) {
+            console.error('[tray] Error al copiar a directorio de instalación:', err.message);
+            return;
+        }
+    }
 
-    if (!fs.existsSync(startupLink)) createShortcut(startupLink, 'Vendy Print Server');
-    if (!fs.existsSync(desktopLink)) createShortcut(desktopLink, 'Vendy Print Server');
+    // Crear/actualizar accesos directos apuntando a la carpeta permanente
+    createShortcut(startupLink, 'Vendy Print Server', INSTALLED_EXE);
+    createShortcut(desktopLink, 'Vendy Print Server', INSTALLED_EXE);
 
-    setTimeout(showInstallMessage, 2000);
+    if (!inInstallDir) {
+        // Mostrar mensaje de éxito y relanzar desde la carpeta permanente
+        setTimeout(() => {
+            showInstallMessage();
+            setTimeout(() => {
+                spawn(INSTALLED_EXE, [], { detached: true, stdio: 'ignore' }).unref();
+                stopServer();
+                if (tray) try { tray.kill(); } catch (_) {}
+                process.exit(0);
+            }, 1000);
+        }, 2000);
+    }
 }
 
 // ── Main ──────────────────────────────────────────────────────
