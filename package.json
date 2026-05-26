@@ -1,6 +1,6 @@
 {
   "name": "vendy-print-server",
-  "version": "1.8.0",
+  "version": "1.9.2",
   "description": "Micro-servicio ESC/POS para impresión térmica nativa",
   "main": "server.js",
   "scripts": {

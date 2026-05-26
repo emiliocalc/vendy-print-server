@@ -28,7 +28,14 @@ let serverLogFn = null; // se inyecta en start() — opcional
 let realtimeChannel = null;
 let pollInterval = null;
 let heartbeatInterval = null;
+let autoRecoveryInterval = null;
+let appLogsHeartbeatInterval = null;
 let processing = false;
+
+// Guardamos los args de start() para poder reiniciar internamente
+let _startArgs = null;
+// Timestamp del último job reclamado exitosamente (para detectar procesador trabado)
+let lastJobProcessedAt = Date.now();
 
 // Mapeo de job_type a tipo de generador
 const JOB_TYPE_MAP = {
@@ -223,7 +230,8 @@ async function processJob(job, via = 'polling') {
     const claimed = await claimJob(job.id);
     if (!claimed) return; // Otro proceso lo tomó
 
-    const claimTime = Date.now();
+    lastJobProcessedAt = Date.now(); // Resetear watchdog
+    const claimTime = lastJobProcessedAt;
     const retryCount = job.retry_count ?? 0;
 
     // Log remoto: permite diagnosticar delays entre creación y procesamiento
@@ -339,6 +347,9 @@ async function pollPendingJobs() {
  * Iniciar procesamiento autónomo
  */
 function start(printFunction, logFunction, serverLogFunction) {
+    _startArgs = { printFn: printFunction, logFn: logFunction, serverLogFn: serverLogFunction };
+    lastJobProcessedAt = Date.now();
+
     printFn     = printFunction;
     if (logFunction)       logFn       = logFunction;
     if (serverLogFunction) serverLogFn = serverLogFunction;
@@ -417,6 +428,56 @@ function start(printFunction, logFunction, serverLogFunction) {
         );
     }, 5 * 60 * 1000);
 
+    // Auto-recovery: si hay jobs pending > 2 min sin procesar, reinicia el procesador
+    autoRecoveryInterval = setInterval(async () => {
+        try {
+            const sb   = supabaseClient.getClient();
+            const oid  = supabaseClient.getOrgId();
+            if (!sb || !oid) return;
+
+            const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+            const { data: stuckJobs } = await sb
+                .from('print_jobs')
+                .select('id')
+                .eq('organization_id', oid)
+                .eq('status', 'pending')
+                .lt('created_at', twoMinAgo)
+                .limit(5);
+
+            if (!stuckJobs || stuckJobs.length === 0) return;
+
+            const msSinceLastProcess = Date.now() - lastJobProcessedAt;
+            if (msSinceLastProcess < 2 * 60 * 1000) return; // procesó algo hace poco
+
+            logFn('WARN', `[processor] Auto-recovery: ${stuckJobs.length} job(s) atascados. Reiniciando procesador...`);
+            logToAppLogs('print_server_auto_recovery', {
+                stuckJobCount:          stuckJobs.length,
+                stuckJobIds:            stuckJobs.map(j => j.id),
+                minSinceLastProcessMs:  Math.round(msSinceLastProcess / 1000),
+                realtimeStatus:         realtimeChannelStatus,
+            }).catch(() => {});
+
+            stop();
+            setTimeout(() => {
+                if (_startArgs) {
+                    start(_startArgs.printFn, _startArgs.logFn, _startArgs.serverLogFn);
+                }
+            }, 1500);
+        } catch (err) {
+            logFn('WARN', `[processor] Auto-recovery check error: ${err.message}`);
+        }
+    }, 60 * 1000);
+
+    // Heartbeat a app_logs cada 2 min — confirma que el servidor está vivo y procesando
+    appLogsHeartbeatInterval = setInterval(() => {
+        logToAppLogs('print_server_heartbeat', {
+            uptimeSeconds:  Math.floor(process.uptime()),
+            realtimeStatus: realtimeChannelStatus,
+            printerBusy,
+            queueLength:    printerQueue.length,
+        }).catch(() => {});
+    }, 2 * 60 * 1000);
+
     const msg = `[processor] Started. Org: ${orgId}. Realtime + polling every 2s, heartbeat every 30s`;
     console.log(msg);
     logFn('INFO', msg);
@@ -444,6 +505,14 @@ function stop() {
     if (recoveryInterval) {
         clearInterval(recoveryInterval);
         recoveryInterval = null;
+    }
+    if (autoRecoveryInterval) {
+        clearInterval(autoRecoveryInterval);
+        autoRecoveryInterval = null;
+    }
+    if (appLogsHeartbeatInterval) {
+        clearInterval(appLogsHeartbeatInterval);
+        appLogsHeartbeatInterval = null;
     }
     logFn('INFO', '[processor] Stopped');
 }
