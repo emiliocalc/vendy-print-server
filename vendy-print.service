@@ -1,0 +1,15 @@
+[Unit]
+Description=Vendy Print Server (ESC/POS)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/Documents/proyectos/vendy_app_v1.0/print-server
+EnvironmentFile=/etc/vendy-print.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+_legacy/
+releases/
+daemon/
+installers/
+*.log
+.vendy-credentials.json
+vendy-print.env
+package-lock.json

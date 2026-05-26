@@ -1,75 +1,73 @@
 /**
  * Instalador de servicio de Windows para Vendy Print Server
- * Instala el servidor como servicio que se ejecuta automáticamente
+ *
+ * - Si ya existe una versión anterior → la desinstala primero
+ * - Instala la nueva versión como servicio de Windows
+ * - El servicio arranca automáticamente en cada reinicio
  */
 
 const Service = require('node-windows').Service;
 const path = require('path');
 
-// Crear servicio
+console.log('');
+console.log('╔════════════════════════════════════════════╗');
+console.log('║     VENDY PRINT SERVER — INSTALADOR        ║');
+console.log('╚════════════════════════════════════════════╝');
+console.log('');
+
 const svc = new Service({
     name: 'Vendy Print Server',
     description: 'Servidor de impresión térmica ESC/POS para Vendy',
     script: path.join(__dirname, 'server.js'),
     nodeOptions: [],
-    env: [
-        {
-            name: "NODE_ENV",
-            value: "production"
-        }
-    ]
+    env: [{ name: 'NODE_ENV', value: 'production' }]
 });
 
-// Escuchar eventos
-svc.on('install', function() {
+// ─── Eventos ─────────────────────────────────────────────────────────────────
+
+svc.on('install', function () {
     console.log('✅ Servicio instalado correctamente');
-    console.log('⏳ Esperando 3 segundos para que Windows registre el servicio...');
-    // Esperar antes de start() — el SCM necesita un momento después del install
-    // para registrar completamente el servicio, o el primer inicio falla.
-    setTimeout(() => {
-        console.log('🚀 Iniciando servicio...');
-        svc.start();
-    }, 3000);
+    console.log('⏳ Esperando 3 segundos para iniciar...');
+    // El SCM necesita un momento para registrar el servicio antes del start
+    setTimeout(() => svc.start(), 3000);
 });
 
-svc.on('start', function() {
+svc.on('start', function () {
     console.log('✅ Servicio iniciado correctamente');
     console.log('');
     console.log('╔════════════════════════════════════════════╗');
     console.log('║  ✅ INSTALACIÓN COMPLETADA                 ║');
     console.log('╚════════════════════════════════════════════╝');
     console.log('');
-    console.log('El servidor de impresión está corriendo y se');
-    console.log('iniciará automáticamente cada vez que encienda');
-    console.log('su computadora.');
+    console.log('El servidor de impresión está corriendo.');
+    console.log('Se iniciará automáticamente con cada encendido.');
     console.log('');
-    console.log('📍 Puerto: 9123');
-    console.log('🌐 Estado: http://localhost:9123/status');
-    console.log('');
-    console.log('Para desinstalar el servicio, ejecute:');
-    console.log('   desinstalar-servicio.bat');
+    console.log('Puerto:  http://localhost:9123');
+    console.log('Estado:  http://localhost:9123/status');
     console.log('');
 });
 
-svc.on('alreadyinstalled', function() {
-    console.log('⚠️  El servicio ya está instalado');
+svc.on('uninstall', function () {
+    console.log('✅ Versión anterior desinstalada');
+    console.log('📦 Instalando versión nueva...');
     console.log('');
-    console.log('Si desea reinstalarlo:');
-    console.log('1. Ejecute: desinstalar-servicio.bat');
-    console.log('2. Luego ejecute este instalador nuevamente');
+    // Esperar que Windows libere los recursos antes de reinstalar
+    setTimeout(() => svc.install(), 2000);
 });
 
-svc.on('error', function(err) {
+svc.on('error', function (err) {
     console.error('❌ Error:', err);
 });
 
-// Instalar servicio
-console.log('');
-console.log('╔════════════════════════════════════════════╗');
-console.log('║  VENDY PRINT - INSTALAR SERVICIO           ║');
-console.log('╚════════════════════════════════════════════╝');
-console.log('');
-console.log('📦 Instalando servicio de Windows...');
-console.log('');
+// ─── Flujo principal ──────────────────────────────────────────────────────────
 
-svc.install();
+if (svc.exists) {
+    console.log('🔄 Se encontró una versión anterior instalada.');
+    console.log('   Desinstalando antes de continuar...');
+    console.log('');
+    svc.uninstall();
+} else {
+    console.log('📦 Instalando servicio de Windows...');
+    console.log('');
+    svc.install();
+}

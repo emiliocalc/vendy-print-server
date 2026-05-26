@@ -373,10 +373,15 @@ class ESCPOSGenerator {
 
     // Total destacado
     totalLine(amount) {
+        const { maxChars } = this.config;
+        const label = 'TOTAL:';
+        const priceStr = formatPrice(amount);
+        const spaces = maxChars - label.length - priceStr.length;
         this.doubleSeparator();
-        this.bold(true).doubleSize(true);
-        this.line('TOTAL: ' + formatPrice(amount));
-        this.bold(false).doubleSize(false);
+        this.bold(true);
+        this.line(label + ' '.repeat(Math.max(1, spaces)) + priceStr);
+        this.bold(false);
+        this.doubleSeparator();
         return this;
     }
 
@@ -425,6 +430,7 @@ function generateCashierTicket(data, printerWidth = '80mm', customMaxChars = nul
        .bold(true).doubleSize(true)
        .line(data.headerText || 'CAFETERIA')
        .bold(false).doubleSize(false)
+       .newLine()
        .line(`Mesa: ${data.table || 'N/A'}`)
        .line(date)
        .separator()
@@ -443,8 +449,7 @@ function generateCashierTicket(data, printerWidth = '80mm', customMaxChars = nul
     gen.separator()
        .summaryLine('SUBTOTAL:', subtotal)
        .summaryLine('Propina sugerida 10%:', propina)
-       .totalLine(total)
-       .newLine();
+       .totalLine(total);
 
     // Footer
     const footerLines = (data.footerText || 'Gracias por su visita!\nVuelva pronto').split('\n');

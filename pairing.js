@@ -63,14 +63,20 @@ async function pair(code, supabaseUrl, anonKey, printFn, logFn) {
             return { success: false, error: result.error || 'Pairing failed' };
         }
 
-        // Guardar credenciales
-        supabaseClient.saveCredentials(result.credentials);
+        // Guardar credenciales (access_token + refresh_token de Supabase Auth)
+        const finalCredentials = {
+            ...result.credentials,
+            anonKey: result.credentials.anonKey || anonKey  // fallback por si acaso
+        };
+        supabaseClient.saveCredentials(finalCredentials);
 
         // Inicializar conexión Supabase
         const authOk = await supabaseClient.init();
         if (!authOk) {
+            const reason = supabaseClient.getLastInitError() || 'unknown';
+            logFn('ERROR', `[pairing] Auth failed: ${reason}`);
             supabaseClient.clearCredentials();
-            return { success: false, error: 'No se pudo autenticar con las credenciales recibidas' };
+            return { success: false, error: `Auth failed: ${reason}` };
         }
 
         // Cargar config de la org

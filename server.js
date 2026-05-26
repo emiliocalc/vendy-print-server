@@ -35,7 +35,7 @@ const pairing = require('./pairing');
 /** Lee .env desde process.cwd() y popula process.env (sin sobreescribir vars ya seteadas) */
 function loadEnvFile() {
     try {
-        const envPath = path.join(__dirname, '.env');
+        const envPath = path.join(process.cwd(), '.env');
         const content = fs.readFileSync(envPath, 'utf8');
         for (const line of content.split(/\r?\n/)) {
             const trimmed = line.trim();
@@ -56,7 +56,7 @@ function loadEnvFile() {
 /** Persiste PRINT_API_KEY en .env para que sobreviva reinicios del servicio */
 function saveApiKeyToEnv(key) {
     try {
-        const envPath = path.join(__dirname, '.env');
+        const envPath = path.join(process.cwd(), '.env');
         let content = '';
         try { content = fs.readFileSync(envPath, 'utf8'); } catch (_) {}
         if (/^PRINT_API_KEY=/m.test(content)) {
@@ -102,12 +102,69 @@ const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 // Detectar sistema operativo
 const IS_WINDOWS = os.platform() === 'win32';
 const IS_LINUX = os.platform() === 'linux';
-// __dirname = directorio del .js, correcto en dev, servicio y pkg
-const LOG_FILE = path.join(__dirname, 'print-server.log');
-const SERVER_LOG_FILE = path.join(__dirname, 'server.log');
+// process.cwd() = AppDirectory configurado por NSSM = directorio real del exe en disco.
+// NO usar __dirname: pkg usa filesystem virtual C:\snapshot\ (solo lectura).
+const LOG_FILE = path.join(process.cwd(), 'print-server.log');
+const SERVER_LOG_FILE = path.join(process.cwd(), 'server.log');
 
 // Sistema de log rotation
 const { startRotation } = require('./logRotation');
+
+// Estado de salud de la impresora
+const printerStatus = {
+    ready:     null,   // null = aún no chequeado, true/false después
+    lastCheck: null,
+    error:     null
+};
+
+/**
+ * Chequea si la impresora responde usando Get-Printer (Windows) o existencia del device (Linux).
+ * No imprime nada — solo verifica que la impresora esté accesible.
+ * Corre cada 60s y al arrancar. Registra en serverLog cuando cambia el estado.
+ */
+async function checkPrinterHealth() {
+    const previousReady = printerStatus.ready;
+
+    if (IS_WINDOWS) {
+        const printerName = PRINTER_NAME;
+        if (!printerName) {
+            printerStatus.ready = null; // No configurada — no podemos chequear
+            return;
+        }
+        try {
+            await new Promise((resolve, reject) => {
+                const child = spawn('powershell.exe', [
+                    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-Command',
+                    `$p = Get-Printer -Name '${printerName.replace(/'/g, "''")}' -ErrorAction SilentlyContinue; if ($p) { exit 0 } else { exit 1 }`
+                ], { windowsHide: true });
+                const timer = setTimeout(() => { child.kill(); reject(new Error('Timeout')); }, 8000);
+                child.on('close', (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('Impresora no encontrada')); });
+                child.on('error', (e) => { clearTimeout(timer); reject(e); });
+            });
+            printerStatus.ready = true;
+            printerStatus.error = null;
+        } catch (err) {
+            printerStatus.ready = false;
+            printerStatus.error = err.message;
+        }
+    } else if (IS_LINUX) {
+        const device = PRINTER_NAME || PRINTER_DEVICE;
+        printerStatus.ready = fs.existsSync(device);
+        printerStatus.error = printerStatus.ready ? null : `Dispositivo no encontrado: ${device}`;
+    }
+
+    printerStatus.lastCheck = new Date().toISOString();
+
+    // Registrar solo cuando cambia el estado (no spam cada 60s)
+    if (previousReady !== printerStatus.ready) {
+        const msg = printerStatus.ready
+            ? `[printer] Impresora en línea: ${PRINTER_NAME || PRINTER_DEVICE}`
+            : `[printer] Impresora OFFLINE: ${printerStatus.error}`;
+        serverLog(printerStatus.ready ? 'INFO' : 'WARN', msg);
+        console.log(msg);
+    }
+}
 
 // Métricas del servidor
 const metrics = {
@@ -218,6 +275,18 @@ function serverLog(level, message, meta = null) {
     } catch (_) { /* silencioso — no crashear por un error de log */ }
 }
 
+async function logToAppLogs(event, details) {
+    try {
+        const supabase = supabaseClient.getClient();
+        const orgId    = supabaseClient.getOrgId();
+        if (!supabase || !orgId) return;
+        await supabase.from('app_logs').insert({
+            event,
+            details: JSON.stringify({ ...details, organizationId: orgId }),
+        });
+    } catch (_) { /* best-effort — no crashear por un error de log */ }
+}
+
 /**
  * Envía datos a la impresora en Linux
  */
@@ -300,7 +369,7 @@ function printWindows(buffer, printerName = PRINTER_NAME) {
                 '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                 '-Command',
                 'Get-Printer | Where-Object { $_.Default -eq $true } | Select-Object -ExpandProperty Name'
-            ]);
+            ], { windowsHide: true });
             let stdout = '';
             child.stdout.on('data', d => { stdout += d; });
             child.on('close', (code) => {
@@ -396,7 +465,7 @@ if (-not $ok) { throw "WritePrinter devolvio false - impresora no encontrada o s
 
     const child = spawn('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', psFile
-    ]);
+    ], { windowsHide: true });
 
     let stdoutOutput = '';
     let stderrOutput = '';
@@ -466,7 +535,7 @@ function listPrinters() {
                 '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                 '-Command',
                 'Get-Printer | Select-Object Name,Default | ConvertTo-Json'
-            ]);
+            ], { windowsHide: true });
             let stdout = '';
             child.stdout.on('data', d => { stdout += d; });
             child.on('close', (code) => {
@@ -583,13 +652,19 @@ function handleRequest(req, res) {
         res.end(JSON.stringify({
             status: 'online',
             platform: os.platform(),
-            version: '1.0.0',
+            version: '1.4.9',
             uptime: getUptime(),
             defaultDevice: IS_LINUX ? (PRINTER_NAME || PRINTER_DEVICE) : PRINTER_NAME,
             autonomous: {
                 paired: supabaseClient.isAuthenticated(),
                 processing: printJobProcessor.isRunning(),
                 organizationId: supabaseClient.getOrgId() || null
+            },
+            printer: {
+                ready:     printerStatus.ready,
+                lastCheck: printerStatus.lastCheck,
+                error:     printerStatus.error || null,
+                name:      PRINTER_NAME || null
             },
             metrics: {
                 requests: metrics.requests,
@@ -854,7 +929,8 @@ process.on('uncaughtException', (err) => {
     const msg = `[CRASH] uncaughtException: ${err.message}`;
     console.error(msg, err.stack);
     serverLog('CRASH', msg, { stack: err.stack?.slice(0, 500) });
-    // Dar 500ms para que serverLog termine de escribir antes del exit
+    logToAppLogs('print_server_caida', { error: err.message, stack: err.stack?.slice(0, 300) });
+    // Dar 500ms para que los logs terminen de escribir antes del exit
     setTimeout(() => process.exit(1), 500);
 });
 
@@ -902,6 +978,10 @@ server.listen(PORT, () => {
     // Iniciar log rotation automática para ambos logs
     startRotation(LOG_FILE);
     startRotation(SERVER_LOG_FILE);
+
+    // Health check de impresora: al arrancar y cada 60s
+    checkPrinterHealth();
+    setInterval(checkPrinterHealth, 60000);
     console.log('📋 Log rotation activada (max: 10MB por archivo, 5 archivos)');
 
     // Intentar auto-start del modo autónomo
@@ -909,6 +989,7 @@ server.listen(PORT, () => {
         if (started) {
             console.log('✅ Modo autónomo activo - procesando cola de impresión');
             serverLog('INFO', 'Servidor iniciado — modo autónomo activo', { port: PORT, pid: process.pid });
+            logToAppLogs('print_server_arranque', { port: PORT, pid: process.pid });
         } else {
             console.log('ℹ️  Sin vinculación. Use POST /pair para vincular con una organización.');
             serverLog('INFO', 'Servidor iniciado — esperando vinculación', { port: PORT, pid: process.pid });
@@ -933,6 +1014,7 @@ server.listen(PORT, () => {
                 printJobProcessor.start(print, logEvent, serverLog);
                 serverLog('INFO', '[watchdog] Procesador reiniciado correctamente');
                 console.log('[watchdog] ✅ Processor restarted');
+                logToAppLogs('print_server_watchdog_restart', { reason: 'processor_stopped' });
             } else {
                 serverLog('ERROR', '[watchdog] Re-auth fallida — reintentando en próximo ciclo');
             }
@@ -942,15 +1024,18 @@ server.listen(PORT, () => {
     }, 30000);
 });
 
-// Manejar cierre graceful
-process.on('SIGINT', () => {
-    console.log('\nCerrando servidor...');
+// Manejar cierre graceful (SIGINT = Ctrl+C, SIGTERM = NSSM/systemd stop)
+function gracefulShutdown(signal) {
+    console.log(`\n[${signal}] Cerrando servidor...`);
     printJobProcessor.stop();
     server.close(() => {
         console.log('Servidor cerrado.');
-        logEvent('INFO', 'Server stopped');
+        logEvent('INFO', `Server stopped (${signal})`);
         process.exit(0);
     });
-});
+}
+
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 module.exports = { server, print, listPrinters, serverLog };

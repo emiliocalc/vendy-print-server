@@ -1,8 +1,10 @@
 /**
  * Módulo de autenticación Supabase para print-server
  *
- * Maneja credenciales del device, auto-refresh de tokens,
- * y persistencia local en .vendy-credentials.json
+ * Usa un Auth user con app_metadata generado por la Edge Function
+ * pair-print-device. Supabase firma los tokens (ES256) con su clave privada.
+ *
+ * Credentials format: { supabaseUrl, anonKey, access_token, refresh_token, organizationId, deviceId }
  */
 
 const { createClient } = require('@supabase/supabase-js');
@@ -14,15 +16,16 @@ if (!globalThis.WebSocket) {
     globalThis.WebSocket = require('ws');
 }
 
-// __dirname = directorio del archivo .js, siempre correcto independiente de cómo
-// se inicie el servicio (NSSM, node-windows, línea de comandos, pkg).
-// process.cwd() puede apuntar a C:\Windows\System32 en el primer inicio como servicio.
-const CREDENTIALS_FILE = path.join(__dirname, '.vendy-credentials.json');
+// NSSM configura AppDirectory = directorio de instalación, por lo que process.cwd()
+// apunta al directorio real del exe en disco (ej. C:\Program Files\Vendy Print Server\).
+// NO usar __dirname: pkg compila con filesystem virtual C:\snapshot\ (solo lectura).
+const CREDENTIALS_FILE = path.join(process.cwd(), '.vendy-credentials.json');
 
 let supabase = null;
 let organizationId = null;
 let deviceId = null;
 let credentials = null;
+let lastInitError = null;
 
 function loadCredentials() {
     try {
@@ -56,71 +59,82 @@ function clearCredentials() {
 }
 
 async function init() {
+    lastInitError = null;
     credentials = loadCredentials();
-    if (!credentials) return false;
+    if (!credentials) {
+        lastInitError = 'No credentials file found';
+        return false;
+    }
 
-    const { supabaseUrl, anonKey, email, password } = credentials;
-    if (!supabaseUrl || !anonKey || !email || !password) {
-        console.error('[supabaseClient] Incomplete credentials');
+    const { supabaseUrl, anonKey, access_token, refresh_token, organizationId: orgId, deviceId: devId } = credentials;
+
+    if (!supabaseUrl || !anonKey || !access_token || !refresh_token || !orgId || !devId) {
+        const fields = { supabaseUrl, anonKey, access_token, refresh_token, organizationId: orgId, deviceId: devId };
+        const missing = Object.entries(fields).filter(([, v]) => !v).map(([k]) => k);
+        lastInitError = `Incomplete credentials — missing: ${missing.join(', ')}`;
+        console.error('[supabaseClient]', lastInitError);
         return false;
     }
 
     supabase = createClient(supabaseUrl, anonKey, {
-        auth: { persistSession: false }
+        auth: {
+            persistSession:       false,
+            autoRefreshToken:     true,
+            detectSessionFromUrl: false,
+        }
     });
 
-    // Autenticar con email/password del device
-    let data, error;
-    try {
-        ({ data, error } = await supabase.auth.signInWithPassword({ email, password }));
-    } catch (networkErr) {
-        console.error('[supabaseClient] Network error during auth:', networkErr.message);
-        supabase = null;
-        throw networkErr; // Re-throw so tryAutoStart can retry
-    }
-
-    if (error) {
-        console.error('[supabaseClient] Auth failed:', error.message);
+    // Establecer sesión con los tokens guardados
+    const { error: sessionError } = await supabase.auth.setSession({ access_token, refresh_token });
+    if (sessionError) {
+        lastInitError = `Session error: ${sessionError.message}`;
+        console.error('[supabaseClient]', lastInitError);
         supabase = null;
         return false;
     }
 
-    // Setear token JWT en Realtime (necesario con persistSession: false en Node.js)
-    if (data.session?.access_token) {
-        supabase.realtime.setAuth(data.session.access_token);
-        console.log('[supabaseClient] Realtime auth token set');
-    }
-
-    // Persistir tokens actualizados en cada refresh
+    // Cuando el token se refresca automáticamente, guardar los nuevos tokens en disco
     supabase.auth.onAuthStateChange((event, session) => {
         if (event === 'TOKEN_REFRESHED' && session) {
-            console.log('[supabaseClient] Token refreshed');
-            // Actualizar token de Realtime también
+            const current = loadCredentials();
+            if (current) {
+                saveCredentials({ ...current, access_token: session.access_token, refresh_token: session.refresh_token });
+                console.log('[supabaseClient] Tokens refreshed and saved');
+            }
+            // Actualizar auth de Realtime con el nuevo token
             supabase.realtime.setAuth(session.access_token);
-        }
-        if (event === 'SIGNED_OUT') {
-            console.warn('[supabaseClient] Session ended - device may have been revoked');
         }
     });
 
-    organizationId = credentials.organizationId || null;
-    deviceId = credentials.deviceId || null;
+    // Inyectar token en Realtime
+    supabase.realtime.setAuth(access_token);
 
-    // Si no tenemos orgId en las credenciales, buscarlo en profiles
-    if (!organizationId && data.user) {
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('organization_id')
-            .eq('id', data.user.id)
+    organizationId = orgId;
+    deviceId = devId;
+
+    // Validar que la sesión funcione con una query real
+    try {
+        const { error } = await supabase
+            .from('print_devices')
+            .select('id')
+            .eq('id', deviceId)
             .single();
-        if (profile) {
-            organizationId = profile.organization_id;
-            credentials.organizationId = organizationId;
-            saveCredentials(credentials);
+
+        if (error) {
+            lastInitError = `Session validation failed: ${error.message} (code: ${error.code})`;
+            console.error('[supabaseClient]', lastInitError);
+            supabase = null;
+            organizationId = null;
+            deviceId = null;
+            return false;
         }
+    } catch (networkErr) {
+        console.error('[supabaseClient] Network error during validation:', networkErr.message);
+        supabase = null;
+        throw networkErr;
     }
 
-    console.log(`[supabaseClient] Authenticated. Org: ${organizationId}, Device: ${deviceId}`);
+    console.log(`[supabaseClient] Authenticated via Auth session. Org: ${organizationId}, Device: ${deviceId}`);
     return true;
 }
 
@@ -128,6 +142,7 @@ function getClient() { return supabase; }
 function getOrgId() { return organizationId; }
 function getDeviceId() { return deviceId; }
 function isAuthenticated() { return !!supabase && !!organizationId; }
+function getLastInitError() { return lastInitError; }
 
 module.exports = {
     init,
@@ -135,6 +150,7 @@ module.exports = {
     getOrgId,
     getDeviceId,
     isAuthenticated,
+    getLastInitError,
     loadCredentials,
     saveCredentials,
     clearCredentials,

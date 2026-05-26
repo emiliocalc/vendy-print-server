@@ -1,15 +1,17 @@
 {
   "name": "vendy-print-server",
-  "version": "1.4.3",
+  "version": "1.8.0",
   "description": "Micro-servicio ESC/POS para impresión térmica nativa",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
     "build": "pkg . --compress GZip",
-    "build:win": "pkg . --targets node20-win-x64 --compress GZip --output dist/vendy-print-server.exe"
+    "build:win": "pkg . --targets node20-win-x64 --compress GZip --output dist/vendy-print-server.exe && node patch-subsystem.js dist/vendy-print-server.exe",
+    "build:uninstaller": "pkg uninstaller.js --targets node20-win-x64 --compress GZip --output dist/VendyPrintServer-Uninstaller.exe && node patch-subsystem.js dist/VendyPrintServer-Uninstaller.exe",
+    "build:all": "npm run build:win && npm run build:uninstaller"
   },
-  "bin": "server.js",
+  "bin": "tray.js",
   "pkg": {
     "targets": [
       "node20-win-x64"
@@ -20,9 +22,12 @@
       "service-installer.js",
       "service-uninstaller.js",
       "printJobProcessor.js",
-      "logRotation.js"
+      "logRotation.js",
+      "assets/icon.ico",
+      "node_modules/systray/traybin/tray_windows_release.exe"
     ],
     "scripts": [
+      "tray.js",
       "server.js",
       "printJobProcessor.js",
       "logRotation.js"
@@ -30,7 +35,10 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
-    "node-windows": "^1.0.0-beta.8"
+    "jimp": "^1.6.0",
+    "node-windows": "^1.0.0-beta.8",
+    "png-to-ico": "^3.0.1",
+    "systray": "^1.0.5"
   },
   "author": "Vendy",
   "license": "MIT",

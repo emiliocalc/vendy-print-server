@@ -31,7 +31,7 @@ async function fetch() {
         maxChars58: data.printer_58mm_max_chars || 20,
         maxChars80: data.printer_80mm_max_chars || 42,
         headerText: data.ticket_header_text || 'CAFETERIA',
-        footerText: data.ticket_footer_text || 'Gracias por su visita!'
+        footerText: data.ticket_footer_text || '¿Tienes un negocio?\nEste Punto de Venta cuesta $11.990 al mes.\nwww.somosvendy.cl\n\n\n'
     };
 
     console.log('[orgConfig] Loaded:', orgConfig.printerWidth, `header="${orgConfig.headerText}"`);
